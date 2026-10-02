@@ -14,6 +14,11 @@ class FieldSnapshot:
     dni_w_m2: float
     durable_dni_w_m2: float
     durable_ok: bool
+    confidence: float
+    confidence_level: str
+    aggregation: str
+    trusted_meters: tuple[str, ...]
+    rejected_meters: tuple[str, ...]
     mirrors: int
     focusing: int
     excluded: int
@@ -28,6 +33,11 @@ class FieldSnapshot:
             "dni_w_m2": round(self.dni_w_m2, 2),
             "durable_dni_w_m2": round(self.durable_dni_w_m2, 2),
             "durable_ok": self.durable_ok,
+            "confidence": round(self.confidence, 4),
+            "confidence_level": self.confidence_level,
+            "aggregation": self.aggregation,
+            "trusted_meters": list(self.trusted_meters),
+            "rejected_meters": list(self.rejected_meters),
             "mirrors": self.mirrors,
             "focusing": self.focusing,
             "excluded": self.excluded,

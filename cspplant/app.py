@@ -265,8 +265,7 @@ class Platform:
             detail = {
                 key: value
                 for key, value in dict(step.get("detail", {})).items()
-                if not isinstance(value, (dict, list))
-                and key not in reserved
+                if key not in reserved
             }
             self.bus.publish(
                 Event.of(
@@ -374,8 +373,12 @@ class Platform:
 
     # ---- 操作编排 -----------------------------------------------------
 
-    def track(self, dni_w_m2: float, minute_of_day: float | None = None) -> dict:
-        """追日：采集 → 落盘 → 判定 → 下发。"""
+    def track(
+        self,
+        dni_w_m2: float | dict[str, float | None],
+        minute_of_day: float | None = None,
+    ) -> dict:
+        """追日：多路采集 → 落盘 → 判定 → 下发。"""
 
         with self._lock:
             op_id = self.ids.next()

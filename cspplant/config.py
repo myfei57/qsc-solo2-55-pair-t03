@@ -82,12 +82,15 @@ class HeliostatLimits:
 
 @dataclass(frozen=True)
 class IrradianceLimits:
-    """辐照采样与有效期约束。"""
+    """多路辐照采样、投票与有效期约束。"""
 
     dni_min_w_m2: float
     dni_max_w_m2: float
     sample_period_s: float
     stale_after_s: float
+    meter_count: int
+    agreement_tolerance: float
+    min_focus_confidence: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "IrradianceLimits":
@@ -96,17 +99,30 @@ class IrradianceLimits:
             dni_max_w_m2=_number(section, "dni_max_w_m2", minimum=1.0),
             sample_period_s=_number(section, "sample_period_s", minimum=1.0),
             stale_after_s=_number(section, "stale_after_s", minimum=1.0),
+            meter_count=_integer(section, "meter_count", minimum=3),
+            agreement_tolerance=_number(section, "agreement_tolerance", minimum=0.001),
+            min_focus_confidence=_number(section, "min_focus_confidence", minimum=0.0),
         )
         if limits.dni_min_w_m2 >= limits.dni_max_w_m2:
             raise ConfigError("辐照下限必须小于上限", component="config")
         if limits.stale_after_s < limits.sample_period_s:
             raise ConfigError("辐照过期时间不得小于采样周期", component="config")
+        if limits.agreement_tolerance > 0.5:
+            raise ConfigError("辐照计一致性容差不得超过 0.5", component="config")
+        if not 0.0 < limits.min_focus_confidence <= 1.0:
+            raise ConfigError("聚焦最低可信度必须落在 (0, 1] 区间", component="config")
         return limits
 
     def in_range(self, dni_w_m2: float) -> bool:
         """采样值是否落在可信区间内。"""
 
         return self.dni_min_w_m2 <= float(dni_w_m2) <= self.dni_max_w_m2
+
+    def readings_agree(self, left_w_m2: float, right_w_m2: float) -> bool:
+        """两路读数的相对偏差是否在投票容差内。"""
+
+        scale = max(1.0, abs(float(left_w_m2)), abs(float(right_w_m2)))
+        return abs(float(left_w_m2) - float(right_w_m2)) / scale <= self.agreement_tolerance
 
 
 @dataclass(frozen=True)
@@ -344,7 +360,7 @@ def default_config() -> PlatformConfig:
         name="field-control",
         storage_root="var/state",
         heliostat=HeliostatLimits(0.6, 1.2, 0.9, 12.0, 450.0, 0.94),
-        irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
+        irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0, 3, 0.05, 0.60),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
@@ -373,6 +389,9 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "dni_max_w_m2": cfg.irradiance.dni_max_w_m2,
                 "sample_period_s": cfg.irradiance.sample_period_s,
                 "stale_after_s": cfg.irradiance.stale_after_s,
+                "meter_count": cfg.irradiance.meter_count,
+                "agreement_tolerance": cfg.irradiance.agreement_tolerance,
+                "min_focus_confidence": cfg.irradiance.min_focus_confidence,
             },
             "field": {
                 "focus_threshold_w_m2": cfg.field.focus_threshold_w_m2,

@@ -22,7 +22,7 @@ from ..heliostat.sun import SunPosition
 from ..heliostat.zone import ZoneGuard
 from ..ns.zones import ZoneRegistry
 from .dispatch import DispatchController, DispatchOutcome
-from .irradiance import IrradianceMeter, IrradianceSample
+from .irradiance import NONE, UNAVAILABLE, IrradianceMeter, IrradianceVerdict
 from .manual import ManualLease, ManualOverride
 from .persist import FieldPersistence
 from .snapshot import FieldSnapshot
@@ -127,10 +127,16 @@ class FieldController:
 
     # ---- 辐照度 -------------------------------------------------------
 
-    def acquire(self, dni_w_m2: float, now: float) -> IrradianceSample:
-        """采集一次 DNI。"""
+    def acquire(
+        self,
+        dni_w_m2: float | dict[str, float | None],
+        now: float,
+    ) -> IrradianceVerdict:
+        """采集一轮 DNI；传标量时复制到全部辐照计，传映射时按多路投票。"""
 
         with self._lock:
+            if isinstance(dni_w_m2, dict):
+                return self._meter.sample_many(dni_w_m2, now)
             return self._meter.sample(dni_w_m2, now)
 
     def persist_irradiance(self) -> float:
@@ -145,13 +151,19 @@ class FieldController:
         return self._meter.durable()
 
     def durable_ready(self, now: float) -> bool:
-        """落盘快照是否可用（存在、与当前值一致、未过期）。"""
+        """落盘快照是否可用（最近一轮可信、存在、与当前一致、未过期）。"""
 
         return (
-            self._meter.durable() > 0.0
+            self._meter.latest_accepted()
+            and self._meter.durable() > 0.0
             and self._meter.durable_matches_current()
             and not self._meter.stale(now)
         )
+
+    def irradiance_consistency(self, now: float) -> dict:
+        """核对多路读数、投票结论与已落盘快照。"""
+
+        return self._meter.consistency(now)
 
     # ---- 策略与追日 ---------------------------------------------------
 
@@ -454,11 +466,24 @@ class FieldController:
         """汇总镜场状态。"""
 
         decision = self._last_decision
+        verdict = self._meter.latest()
+        confidence = 0.0 if verdict is None else verdict.confidence
+        confidence_level = "low" if verdict is None else verdict.confidence_level
         return {
             "mode": NOT_EVALUATED if decision is None else decision.mode,
             "reason": "not_evaluated" if decision is None else decision.reason,
             "dni_w_m2": round(self._meter.current(), 2),
             "durable_dni_w_m2": round(self._meter.durable(), 2),
+            "confidence": round(confidence, 4),
+            "confidence_level": confidence_level,
+            "aggregation": NONE if verdict is None else verdict.aggregation,
+            "irradiance_mode": UNAVAILABLE if verdict is None else verdict.mode,
+            "trusted_meters": [] if verdict is None else list(verdict.trusted_meters),
+            "rejected_meters": [] if verdict is None else list(verdict.rejected_meters),
+            "meter_health": self._meter.health(),
+            "meter_events": self._meter.health_events(),
+            "readings": [] if verdict is None else [item.as_dict() for item in verdict.readings],
+            "irradiance_consistency": self._meter.consistency(),
             "samples": self._meter.sample_count(),
             "rejected": self._meter.rejected(),
             "persists": self._meter.persist_count(),
@@ -485,12 +510,18 @@ class FieldController:
         """返回镜场状态快照对象。"""
 
         decision = self._last_decision
+        verdict = self._meter.latest()
         return FieldSnapshot(
             mode=NOT_EVALUATED if decision is None else decision.mode,
             reason="not_evaluated" if decision is None else decision.reason,
             dni_w_m2=self._meter.current(),
             durable_dni_w_m2=self._meter.durable(),
             durable_ok=decision is not None and decision.mode == FOCUS,
+            confidence=0.0 if verdict is None else verdict.confidence,
+            confidence_level="low" if verdict is None else verdict.confidence_level,
+            aggregation=NONE if verdict is None else verdict.aggregation,
+            trusted_meters=tuple() if verdict is None else verdict.trusted_meters,
+            rejected_meters=tuple() if verdict is None else verdict.rejected_meters,
             mirrors=len(self._drives),
             focusing=self.focusing_count(),
             excluded=sum(1 for drive in self._drives.values() if drive.excluded),

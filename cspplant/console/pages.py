@@ -65,6 +65,16 @@ def _mirror_page(platform: Platform) -> str:
         ("判定依据", status["reason"]),
         ("当前辐照 (W/m²)", status["dni_w_m2"]),
         ("已落盘辐照 (W/m²)", status["durable_dni_w_m2"]),
+        ("可信度", f"{status['confidence']:.0%}（{status['confidence_level']}）"),
+        ("总辐照口径", status["aggregation"]),
+        ("可信 / 异常辐照计", f"{status['trusted_meters']} / {status['rejected_meters']}"),
+        *[
+            (
+                f"辐照计 {reading['meter_id']}",
+                f"{reading['dni_w_m2']} W/m²，{status['meter_health'][reading['meter_id']]['state']}，{reading['reason'] or 'ok'}",
+            )
+            for reading in status["readings"]
+        ],
         ("采样 / 拒绝 / 落盘次数", f"{status['samples']} / {status['rejected']} / {status['persists']}"),
         ("对焦镜数", f"{status['focusing']} / {status['mirrors']['count']}"),
         ("避让镜数", status["excluded"]),

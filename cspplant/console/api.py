@@ -55,6 +55,7 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/irradiance/consistency", self._irradiance_consistency)
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
         add("POST", "/api/track", self._track)
         add("POST", "/api/circulate", self._circulate)
@@ -207,15 +208,28 @@ class Api:
             "receiver_state": platform.receiver.state(),
             "temperature_c": round(platform.receiver.output_temperature_c(), 2),
             "net_flow_kg_s": round(platform.salt.flow_kg_s(), 3),
+            "field_status": platform.field.status(),
             "last_audit_ts": platform.audit.tail(1)[-1]["ts"] if platform.audit.tail(1) else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
 
+    def _irradiance_consistency(self, params: dict, body: dict) -> dict:
+        platform = self._platform
+        return platform.field.irradiance_consistency(platform.clock.now())
+
     # ---- 动作 ---------------------------------------------------------
 
     def _track(self, params: dict, body: dict) -> dict:
-        dni = _as_float(body, "dni_w_m2", self._platform.field.meter.current())
         minute = body.get("minute_of_day")
+        if "readings" in body:
+            raw_readings = body["readings"]
+            if not isinstance(raw_readings, dict):
+                raise PlantError("参数 'readings' 必须是表号到读数的映射", component="console")
+            readings: dict[str, float | None] = {}
+            for meter_id, value in raw_readings.items():
+                readings[str(meter_id)] = None if value is None else float(value)
+            return self._platform.track(readings, None if minute is None else float(minute))
+        dni = _as_float(body, "dni_w_m2", self._platform.field.meter.current())
         return self._platform.track(dni, None if minute is None else float(minute))
 
     def _circulate(self, params: dict, body: dict) -> dict:

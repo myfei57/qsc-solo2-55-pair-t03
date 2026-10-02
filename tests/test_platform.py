@@ -73,6 +73,41 @@ def test_audit_records_operations_and_rejections(platform):
         platform.field.open_window(["m041"], "maint-north", platform.clock.now())
 
 
+def test_audit_contains_multi_meter_readings_and_durable_verdict(platform):
+    platform.start()
+    readings = {"irradiance-001": 800.0, "irradiance-002": 900.0, "irradiance-003": 802.0}
+    platform.track(readings, 720.0)
+
+    entries = platform.audit.entries(limit=100)
+    acquire = next(item for item in entries if item["action"] == "acquire")
+    assert {item["meter_id"] for item in acquire["payload"]["readings"]} == set(readings)
+    persisted = next(item for item in entries if item["action"] == "persist_irradiance")
+    assert persisted["payload"]["matches_current"] is True
+    assert persisted["payload"]["confidence"] >= platform.config.irradiance.min_focus_confidence
+    assert persisted["payload"]["digest"]
+    durable = platform.field.meter.durable_verdict()
+    assert durable is not None
+    assert durable.rejected_meters == ("irradiance-002",)
+    assert durable.aggregation == "minimum"
+    assert durable.dni_w_m2 == pytest.approx(800.0)
+    assert any(item["action"] == "meter_rejected" for item in entries)
+
+
+def test_meter_recovery_is_written_to_audit(platform):
+    platform.start()
+    healthy = {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 801.0}
+    platform.track(healthy, 720.0)
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 950.0},
+        720.0,
+    )
+    platform.track(healthy, 720.0)
+
+    entries = platform.audit.entries(limit=100)
+    assert any(item["action"] == "meter_rejected" for item in entries)
+    assert any(item["action"] == "meter_recovered" for item in entries)
+
+
 def test_journal_replays_across_restart(platform, clock):
     platform.start()
     platform.track(800.0, 720.0)

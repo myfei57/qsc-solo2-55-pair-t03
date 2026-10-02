@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .dispatch import DispatchController, DispatchOutcome
 from .field import FieldController
-from .irradiance import IrradianceMeter, IrradianceSample
+from .irradiance import IrradianceMeter, IrradianceVerdict, MeterReading
 from .manual import ManualLease, ManualOverride
 from .persist import FieldPersistence
 from .snapshot import FieldSnapshot
@@ -21,7 +21,8 @@ __all__ = [
     "DispatchOutcome",
     "FieldController",
     "IrradianceMeter",
-    "IrradianceSample",
+    "IrradianceVerdict",
+    "MeterReading",
     "ManualLease",
     "ManualOverride",
     "FieldPersistence",

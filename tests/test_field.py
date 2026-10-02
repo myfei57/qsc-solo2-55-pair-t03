@@ -63,6 +63,109 @@ def test_irradiance_rejects_out_of_range_reading(platform):
     assert platform.field.meter.current() == pytest.approx(800.0)
 
 
+def test_multi_meter_consensus_uses_mean_and_persists_verdict(platform):
+    platform.start()
+    readings = {"irradiance-001": 800.0, "irradiance-002": 804.0, "irradiance-003": 798.0}
+    report = platform.track(readings, 720.0)
+
+    assert report["ok"] is True
+    assert report["mode"] == FOCUS
+    status = platform.field.status()
+    assert status["dni_w_m2"] == pytest.approx(800.6666667)
+    assert status["aggregation"] == "mean"
+    assert status["confidence_level"] == "high"
+    assert set(status["trusted_meters"]) == set(readings)
+    stored = platform.store.read("field/irradiance")
+    assert stored["aggregate"]["dni_w_m2"] == pytest.approx(800.6666667)
+    assert stored["verdict"]["aggregation"] == "mean"
+    assert platform.field.irradiance_consistency(platform.clock.now())["ok"] is True
+
+
+def test_partial_failure_uses_conservative_minimum_and_identifies_meter(platform):
+    platform.start()
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 801.0},
+        720.0,
+    )
+    report = platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 950.0},
+        720.0,
+    )
+
+    assert report["ok"] is True
+    assert report["mode"] == FOCUS
+    status = platform.field.status()
+    assert status["aggregation"] == "minimum"
+    assert status["irradiance_mode"] == "degraded"
+    assert status["dni_w_m2"] == pytest.approx(800.0)
+    assert status["rejected_meters"] == ["irradiance-003"]
+    assert status["confidence"] >= platform.config.irradiance.min_focus_confidence
+    assert platform.field.durable_irradiance() == pytest.approx(800.0)
+    assert status["meter_health"]["irradiance-003"]["state"] == "faulty"
+
+
+def test_low_confidence_does_not_write_new_fixed_value_and_parks_field(platform):
+    platform.start()
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 801.0},
+        720.0,
+    )
+    before = platform.store.read("field/irradiance")
+    report = platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 500.0, "irradiance-003": 950.0},
+        720.0,
+    )
+
+    assert report["ok"] is False
+    assert report["mode"] == STANDBY
+    assert report["aimed"] == 0
+    assert platform.store.read("field/irradiance") == before
+    assert platform.field.durable_irradiance() == pytest.approx(801.0)
+
+
+def test_recovered_meter_is_reported_after_consensus_returns(platform):
+    platform.start()
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 801.0},
+        720.0,
+    )
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 950.0},
+        720.0,
+    )
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 803.0},
+        720.0,
+    )
+
+    events = platform.field.status()["meter_events"]
+    assert any(
+        item["meter_id"] == "irradiance-003" and item["event"] == "meter_rejected"
+        for item in events
+    )
+    assert any(
+        item["meter_id"] == "irradiance-003" and item["event"] == "meter_recovered"
+        for item in events
+    )
+    assert platform.field.status()["rejected_meters"] == []
+
+
+def test_tampered_durable_snapshot_fails_digest_check(platform):
+    platform.start()
+    platform.track(
+        {"irradiance-001": 800.0, "irradiance-002": 802.0, "irradiance-003": 801.0},
+        720.0,
+    )
+    snapshot = platform.store.read("field/irradiance")
+    snapshot["aggregate"]["dni_w_m2"] = 999.0
+    platform.store.write("field/irradiance", snapshot)
+
+    assert platform.field.durable_irradiance() == 0.0
+    assert platform.field.irradiance_consistency(platform.clock.now())["checks"]["digest_valid"] is False
+    assert platform.field.track(platform.sun_at(720.0), platform.clock.now())["mode"] == STANDBY
+
+
+
 def test_stale_irradiance_blocks_focus(platform, clock):
     platform.start()
     platform.track(820.0, 720.0)

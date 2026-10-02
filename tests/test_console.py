@@ -44,6 +44,28 @@ def test_api_track_requires_numeric_dni(platform):
     assert bad["component"] == "console"
 
 
+def test_api_track_accepts_multi_meter_readings(platform):
+    api = Api(platform)
+    status, payload = api.handle(
+        "POST",
+        "/api/track",
+        {},
+        {
+            "readings": {
+                "irradiance-001": 800.0,
+                "irradiance-002": 803.0,
+                "irradiance-003": 799.0,
+            },
+            "minute_of_day": 720.0,
+        },
+    )
+    assert status == 200
+    assert payload["mode"] == "focus"
+    status, consistency = api.handle("GET", "/api/irradiance/consistency", {}, {})
+    assert status == 200
+    assert consistency["ok"] is True
+
+
 def test_api_calibrate_rejects_impossible_value(platform):
     api = Api(platform)
     status, payload = api.handle("POST", "/api/calibrate", {}, {"measured_kg_s": -5})
