@@ -54,6 +54,9 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
+        add("GET", "/api/irradiance", self._irradiance)
+        add("GET", "/api/irradiance/verify", lambda params, body: self._platform.verify_irradiance())
+        add("POST", "/api/irradiance/fuse", self._irradiance_fuse)
         add("GET", "/api/readiness", self._readiness)
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
         add("POST", "/api/track", self._track)
@@ -210,6 +213,25 @@ class Api:
             "last_audit_ts": platform.audit.tail(1)[-1]["ts"] if platform.audit.tail(1) else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
+
+    def _irradiance(self, params: dict, body: dict) -> dict:
+        return {
+            "fusion": self._platform.field.fusion_status(),
+            "durable_dni_w_m2": round(self._platform.field.durable_irradiance(), 3),
+        }
+
+    def _irradiance_fuse(self, params: dict, body: dict) -> dict:
+        raw = body.get("readings")
+        if not isinstance(raw, dict):
+            raise PlantError("请求体 readings 必须是 {通道名: 读数} 的映射", component="console")
+        try:
+            readings = {
+                str(key): None if value is None else float(value) for key, value in raw.items()
+            }
+        except (TypeError, ValueError) as error:
+            raise PlantError("辐照计读数必须是数值或 null", component="console") from error
+        mode = str(body.get("mode", "normal_sun"))
+        return self._platform.fuse_irradiance(readings, mode)
 
     # ---- 动作 ---------------------------------------------------------
 

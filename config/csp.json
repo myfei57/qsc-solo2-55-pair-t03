@@ -16,7 +16,8 @@
       "dni_min_w_m2": 250.0,
       "dni_max_w_m2": 1100.0,
       "sample_period_s": 30.0,
-      "stale_after_s": 180.0
+      "stale_after_s": 180.0,
+      "meter_channels": ["irr-a", "irr-b", "irr-c"]
     },
     "field": {
       "focus_threshold_w_m2": 320.0,

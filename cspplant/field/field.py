@@ -28,6 +28,11 @@ from .persist import FieldPersistence
 from .snapshot import FieldSnapshot
 from .strategy import FOCUS, NOT_EVALUATED, STANDBY, STOW, FieldStrategy, StrategyDecision
 from .sweep import SweepPlanner, SweepWindow
+from .voting import (
+    SEALED_POLICY,
+    FusedIrradiance,
+    IrradianceVoter,
+)
 
 MAX_STEPS = 720
 
@@ -50,6 +55,7 @@ class FieldController:
         aim_point: AimPoint,
         maintenance_reach_m: float = 24.0,
         manual_hold_s: float = 900.0,
+        irradiance_channels: list[str] | None = None,
     ) -> None:
         self._registry = registry
         self._limits = limits
@@ -63,6 +69,15 @@ class FieldController:
         self._dispatch = DispatchController(limits)
         self._sweeps = SweepPlanner(limits)
         self._manual = ManualOverride(manual_hold_s)
+        # 多路辐照计表决：装配时给了通道名才启用；不启用时保持单路老链路。
+        self._voter: IrradianceVoter | None = (
+            IrradianceVoter(list(irradiance_channels)) if irradiance_channels else None
+        )
+        self._last_fusion: FusedIrradiance | None = None
+        self._fusion_held = False
+        self._fusion_hold_reason = ""
+        self._fusions = 0
+        self._holds = 0
         self._drives: dict[str, HeliostatDrive] = {
             mirror.name: HeliostatDrive(mirror.name, heliostat_limits, azimuth_deg=180.0)
             for mirror in registry.all()
@@ -145,13 +160,133 @@ class FieldController:
         return self._meter.durable()
 
     def durable_ready(self, now: float) -> bool:
-        """落盘快照是否可用（存在、与当前值一致、未过期）。"""
+        """落盘快照是否可用（存在、与当前值一致、未过期）。
 
+        多路表决启用时还要满足：最近一次融合是已提交状态，不是挂起。
+        """
+
+        if self._voter is not None and self._fusion_held:
+            return False
         return (
             self._meter.durable() > 0.0
             and self._meter.durable_matches_current()
             and not self._meter.stale(now)
         )
+
+    # ---- 多路辐照计表决 -----------------------------------------------
+
+    @property
+    def voter(self) -> IrradianceVoter | None:
+        """多路表决器；装配时未给通道名则为 ``None``。"""
+
+        return self._voter
+
+    def fusion_active(self) -> bool:
+        """多路融合链路是否已启用。"""
+
+        return self._voter is not None
+
+    def last_fusion(self) -> FusedIrradiance | None:
+        """返回最近一次融合结论。"""
+
+        return self._last_fusion
+
+    def fusion_held(self) -> bool:
+        """当前是否处于"不写死值、镜场保守等待"状态。"""
+
+        return self._fusion_held
+
+    def fusion_status(self) -> dict:
+        """汇总多路融合状态（控制台展示与审计用）。"""
+
+        last = self._last_fusion
+        return {
+            "active": self._voter is not None,
+            "channels": [] if self._voter is None else self._voter.names,
+            "channel_states": (
+                {} if self._voter is None else {name: self._voter.state_of(name) for name in self._voter.names}
+            ),
+            "faulty": [] if self._voter is None else self._voter.faulty(),
+            "held": self._fusion_held,
+            "hold_reason": self._fusion_hold_reason,
+            "cycles": 0 if self._voter is None else self._voter.cycle_count(),
+            "fusions": self._fusions,
+            "holds": self._holds,
+            "policy": SEALED_POLICY.describe(),
+            "last": None if last is None else last.as_dict(),
+        }
+
+    def fuse_irradiance(self, readings: dict[str, float | None], mode: str, now: float) -> FusedIrradiance:
+        """多路采集一个周期：判定 → 融合 → 门控落盘。
+
+        可信度不足或工况未知时**只更新挂起标记、不写死值**；提交时才把
+        融合值喂给单路辐照计并原子落盘，让追日、热功率估算等下游链路
+        仍然只认"已落盘且未过期"那一份。
+        """
+
+        if self._voter is None:
+            raise InterlockError("镜场未装配多路辐照计通道", component="field")
+        with self._lock:
+            fused = self._voter.cycle(readings, now, mode)
+            self._last_fusion = fused
+            persistence = self._meter.persistence
+
+            raw_record = persistence.append_raw_readings(
+                {
+                    "cycle": fused.cycle,
+                    "ts": round(fused.ts, 3),
+                    "mode": fused.mode,
+                    "readings": {
+                        verdict.name: verdict.as_dict()["raw"] for verdict in fused.channels
+                    },
+                }
+            )
+            for incident in fused.incidents:
+                persistence.append_incident(
+                    {**incident.as_dict(), "policy_version": fused.policy_version}
+                )
+
+            if fused.committed:
+                assert fused.value is not None
+                sample = self._meter.sample(fused.value, now)
+                if not sample.accepted:
+                    # 融合值本身落在物理量程外属于策略/配置错误：宁可不落盘。
+                    self._fusion_held = True
+                    self._fusion_hold_reason = "fused_value_out_of_range"
+                    self._holds += 1
+                else:
+                    self._meter.persist()
+                    self._fusion_held = False
+                    self._fusion_hold_reason = ""
+                    self._fusions += 1
+            else:
+                self._fusion_held = True
+                self._fusion_hold_reason = fused.reason
+                self._holds += 1
+
+            snapshot = {
+                "status": "committed" if fused.committed else "held",
+                "committed": fused.committed,
+                "cycle": fused.cycle,
+                "ts": round(fused.ts, 3),
+                "mode": fused.mode,
+                "fusion_rule": fused.fusion_rule,
+                "reason": fused.reason,
+                "confidence": fused.confidence.as_dict(),
+                "channels": [verdict.as_dict() for verdict in fused.channels],
+                "incidents": [incident.as_dict() for incident in fused.incidents],
+                "policy_version": fused.policy_version,
+                "policy_fingerprint": fused.policy_fingerprint,
+                "raw_hash": raw_record["hash"],
+            }
+            if fused.committed:
+                snapshot["dni_w_m2"] = round(float(fused.value), 3)
+            path = persistence.write_fusion(snapshot)
+            decision_record = persistence.append_decision({**snapshot, "snapshot_path": path})
+            # 决策行与快照互认：把决策哈希补进快照，形成快照 ↔ 决策链的交叉引用。
+            snapshot["decision_hash"] = decision_record["hash"]
+            persistence.write_fusion(snapshot)
+            return fused
 
     # ---- 策略与追日 ---------------------------------------------------
 
@@ -165,6 +300,11 @@ class FieldController:
                 latched=latched,
                 durable_ok=self.durable_ready(now),
             )
+            # 多路融合挂起时，镜场必须保守待机，并把挂起原因带到模式判定里。
+            if decision.mode == STANDBY and self.fusion_active() and self._fusion_held:
+                decision = StrategyDecision(
+                    STANDBY, f"irradiance_held:{self._fusion_hold_reason}", decision.dni_w_m2
+                )
             self._last_decision = decision
             return decision
 
@@ -179,7 +319,11 @@ class FieldController:
                 {
                     "component": "field",
                     "action": "decide",
-                    "detail": {**decision.as_dict(), "durable_ready": self.durable_ready(now)},
+                    "detail": {
+                        **decision.as_dict(),
+                        "durable_ready": self.durable_ready(now),
+                        "fusion_cycle": 0 if self.last_fusion() is None else self.last_fusion().cycle,
+                    },
                 }
             )
 
@@ -479,12 +623,16 @@ class FieldController:
             "dispatch_requested_pct": round(self._dispatch.requested(), 3),
             "dispatch_clamps": self._dispatch.clamps(),
             "dispatch_resolves": self._dispatch.resolves(),
+            "fusion": self.fusion_status(),
         }
 
     def snapshot(self) -> FieldSnapshot:
         """返回镜场状态快照对象。"""
 
         decision = self._last_decision
+        fusion_level = ""
+        if self._last_fusion is not None:
+            fusion_level = self._last_fusion.confidence.level
         return FieldSnapshot(
             mode=NOT_EVALUATED if decision is None else decision.mode,
             reason="not_evaluated" if decision is None else decision.reason,
@@ -497,6 +645,8 @@ class FieldController:
             manual=self._manual.count(),
             dispatch_pct=self._dispatch.current(),
             dispatch_target_pct=self._dispatch.target(),
+            fusion_held=self._fusion_held,
+            fusion_level=fusion_level,
         )
 
     def stow_angles_for(self, mirror: str) -> AimAngles:

@@ -57,9 +57,10 @@ def _shell(title: str, body: str) -> str:
 
 
 def _mirror_page(platform: Platform) -> str:
-    """镜场页：辐照、策略、对焦与调度。"""
+    """镜场页：多路辐照表决、可信度、策略、对焦与调度。"""
 
     status = platform.status()["field"]
+    fusion = status.get("fusion", {})
     rows = [
         ("运行模式", status["mode"]),
         ("判定依据", status["reason"]),
@@ -75,7 +76,45 @@ def _mirror_page(platform: Platform) -> str:
         ("清洗窗口数", status["windows"]),
         ("热功率 (kW)", round(platform.field.thermal_power_kw(), 1)),
     ]
-    return _shell("镜场控制台", _table("镜场状态", rows))
+    body = _table("镜场状态", rows)
+    body += _fusion_table(fusion)
+    return _shell("镜场控制台", body)
+
+
+def _fusion_table(fusion: dict) -> str:
+    """渲染多路辐照计表决状态；未启用时给一行说明。"""
+
+    if not fusion.get("active"):
+        return _table("多路辐照表决", [("状态", "未装配多路辐照计通道")])
+    last = fusion.get("last") or {}
+    confidence = last.get("confidence", {})
+    policy = fusion.get("policy", {})
+    held = fusion.get("held", False)
+    state_text = ("挂起：不写死值，镜场保守等待" if held else "已提交，镜场按落盘值运行")
+    rows = [
+        ("融合状态", state_text),
+        ("挂起原因", fusion.get("hold_reason") or "-"),
+        ("融合工况 / 规则", f"{last.get('mode', '-')} / {last.get('fusion_rule', '-')}"),
+        ("总辐照 (W/m²)", last.get("dni_w_m2") if last.get("committed") else "—（挂起）"),
+        (
+            "可信度",
+            f"{confidence.get('level', '-')}（{confidence.get('score', '-')}，"
+            f"可信 {confidence.get('trusted_count', '-')}/{confidence.get('total_count', '-')} 路）",
+        ),
+        ("当前故障通道", ", ".join(fusion.get("faulty", [])) or "无"),
+        ("融合 / 挂起周期数", f"{fusion.get('fusions', 0)} / {fusion.get('holds', 0)}"),
+        ("密封策略版本", f"{policy.get('version', '-')}（指纹 {policy.get('fingerprint', '-')}）"),
+    ]
+    body = _table("多路辐照表决", rows)
+    channel_rows: list[tuple[str, object]] = []
+    for verdict in last.get("channels", []):
+        state = {"good": "可信", "suspect": "可疑", "fault": "故障"}.get(verdict["state"], verdict["state"])
+        offense = verdict.get("offense") or "-"
+        channel_rows.append(
+            (verdict["name"], f"{verdict['raw']} W/m² ｜ {state} ｜ {offense}")
+        )
+    body += _table("逐台辐照计（最近周期）", channel_rows or [("（尚未采集）", "-")])
+    return body
 
 
 def _receiver_page(platform: Platform) -> str:

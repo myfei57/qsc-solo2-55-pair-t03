@@ -6,6 +6,9 @@
 ``demo``    在本地跑一遍完整流程（落盘追日 → 熔盐循环 → 带负荷 → 控制周期 →
             并发探测 → 手动接管 → 清洗 → 冷热罐切换 → 停堆与复位），用于交付
             前的真实运行检查；
+``irradiance-demo`` 跑多路辐照计表决脚本（漂移、卡死、死值、恢复、工况切换），
+            打印每个周期的融合结论并在末尾做三路链＋审计一致性核对；
+``verify-irradiance`` 核对多路读数哈希链、落盘快照与审计三方一致性；
 ``status``  打印当前状态快照；
 ``config``  打印生效配置；
 ``reset``   清掉落盘的平台计数。
@@ -139,6 +142,35 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify_irradiance(args: argparse.Namespace) -> int:
+    """核对多路读数链、落盘快照与审计三方一致性。"""
+
+    platform = _build(args)
+    report = platform.verify_irradiance()
+    _dump(report)
+    return 0 if report["ok"] else 3
+
+
+def _cmd_irradiance_demo(args: argparse.Namespace) -> int:
+    """跑多路辐照计表决脚本：故障、恢复、工况切换与末尾一致性核对。"""
+
+    from cspplant.cli_demo_irradiance import run_irradiance_demo
+    import tempfile
+
+    clock = ManualClock()
+    config = load_config(args.config) if getattr(args, "config", None) else default_config()
+    # 演示必须在全新目录起步：审计流水是只追加的，复跑会让三方核对对不上周期数。
+    storage_root = getattr(args, "storage_root", None) or tempfile.mkdtemp(prefix="csp-voting-")
+    platform = build_plant(config, clock=clock, storage_root=storage_root)
+    report = run_irradiance_demo(platform, clock, cycles=args.cycles)
+    _dump(report)
+    print("\n一致性核对：", file=sys.stderr)
+    for check in report["verification"]["checks"]:
+        mark = "PASS" if check["ok"] else "FAIL"
+        print(f"  [{mark}] {check['name']}: {check['detail']}", file=sys.stderr)
+    return 0 if report["verification"]["ok"] else 3
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     platform = _build(args)
     payload = platform.status()
@@ -201,6 +233,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)
+
+    verify_irr = sub.add_parser(
+        "verify-irradiance", help="核对多路读数、落盘快照与审计一致性"
+    )
+    verify_irr.set_defaults(func=_cmd_verify_irradiance)
+
+    irr_demo = sub.add_parser(
+        "irradiance-demo", help="多路辐照计表决演示", parents=[common]
+    )
+    irr_demo.add_argument("--cycles", type=int, default=46, help="演示周期数")
+    irr_demo.set_defaults(func=_cmd_irradiance_demo)
     return parser
 
 

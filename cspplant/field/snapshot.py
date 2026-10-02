@@ -20,6 +20,8 @@ class FieldSnapshot:
     manual: int
     dispatch_pct: float
     dispatch_target_pct: float
+    fusion_held: bool = False
+    fusion_level: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -34,4 +36,6 @@ class FieldSnapshot:
             "manual": self.manual,
             "dispatch_pct": round(self.dispatch_pct, 3),
             "dispatch_target_pct": round(self.dispatch_target_pct, 3),
+            "fusion_held": self.fusion_held,
+            "fusion_level": self.fusion_level,
         }

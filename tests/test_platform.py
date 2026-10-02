@@ -102,7 +102,7 @@ def test_snapshot_exposes_all_sections(online):
         assert key in snapshot
     assert snapshot["zones"]["count"] == 3
     assert snapshot["heliostats"]["count"] == 123
-    assert snapshot["namespaces"]["count"] == 13
+    assert snapshot["namespaces"]["count"] == 16
 
 
 def test_trend_collects_signals_after_cycles(online):

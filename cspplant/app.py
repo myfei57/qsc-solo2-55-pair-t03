@@ -128,6 +128,7 @@ class Platform:
             AimPoint(0.0, 0.0, AIM_POINT_Z_M),
             maintenance_reach_m=MAINTENANCE_REACH_M,
             manual_hold_s=MANUAL_HOLD_S,
+            irradiance_channels=list(self.config.irradiance.meter_channels),
         )
 
         threshold = ThresholdModel(self.config.salt)
@@ -215,7 +216,7 @@ class Platform:
         """登记现场设备命名空间（控制台与审计共用同一套名字）。"""
 
         for area, device, kind in (
-            ("field", "irradiance", "irradiance-meter"),
+            ("field", "irradiance", "irradiance-voter"),
             ("field", "tracking", "heliostat-field"),
             ("field", "dispatch", "dispatch-controller"),
             ("tower", "receiver", "receiver"),
@@ -230,6 +231,9 @@ class Platform:
             ("wash", "drain", "drain-valve"),
         ):
             self.namespaces.register(area, device, kind)
+        # 每台物理辐照计单独登记，故障审计里的资产名在拓扑里必须查得到。
+        for channel in self.config.irradiance.meter_channels:
+            self.namespaces.register("field", channel, "irradiance-meter")
 
     def _restore(self) -> None:
         """从落盘状态恢复平台计数，并回放最近一次停堆原因。"""
@@ -387,6 +391,125 @@ class Platform:
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    # 已知多路辐照计工况，供控制台与审计引用（规则本体密封在 voting 模块）。
+    IRRADIANCE_MODES = (
+        "startup",
+        "normal_sun",
+        "cloud_transient",
+        "shutdown",
+    )
+
+    def fuse_irradiance(
+        self,
+        readings: dict[str, float | None],
+        mode: str = "normal_sun",
+    ) -> dict:
+        """多路辐照计采集一个周期：表决、融合、门控落盘并写审计。
+
+        可信度不足或工况未知时不写死值，只记录挂起；每路故障升级／恢复
+        都单独落审计事件，恢复正常后审计里能指出是哪台、什么故障。
+        """
+
+        from .field.voting import KNOWN_MODES
+
+        with self._lock:
+            if mode not in KNOWN_MODES:
+                self.bus.publish(
+                    Event.of(
+                        "field",
+                        "field",
+                        "irradiance_unknown_mode",
+                        asset="irradiance",
+                        severity="alarm",
+                        message=f"未知辐照工况 {mode}，本周期挂起不写死值",
+                        mode=mode,
+                    )
+                )
+            fused = self.field.fuse_irradiance(readings, mode, self.clock.now())
+            for incident in fused.incidents:
+                if incident.kind == "fault":
+                    self.bus.publish(
+                        Event.of(
+                            "field",
+                            "field",
+                            "irradiance_meter_fault",
+                            asset=incident.name,
+                            severity="alarm",
+                            message=f"辐照计 {incident.name} 判为故障（{incident.offense}）",
+                            meter=incident.name,
+                            offense=incident.offense,
+                            cycle=incident.cycle,
+                        )
+                    )
+                else:
+                    self.bus.publish(
+                        Event.of(
+                            "field",
+                            "field",
+                            "irradiance_meter_recovered",
+                            asset=incident.name,
+                            severity="notice",
+                            message=f"辐照计 {incident.name} 已恢复（此前 {incident.offense}）",
+                            meter=incident.name,
+                            offense=incident.offense,
+                            cycle=incident.cycle,
+                        )
+                    )
+            self.bus.publish(
+                Event.of(
+                    "field",
+                    "field",
+                    "irradiance_fused",
+                    asset="irradiance",
+                    severity="notice" if fused.committed else "warning",
+                    message=(
+                        f"总辐照 {fused.value} W/m²（{fused.confidence.level}）"
+                        if fused.committed
+                        else f"辐照挂起：{fused.reason}（{fused.confidence.level}），镜场保守等待"
+                    ),
+                    cycle=fused.cycle,
+                    mode=fused.mode,
+                    fusion_rule=fused.fusion_rule,
+                    committed=fused.committed,
+                    reason=fused.reason,
+                    dni_w_m2=fused.value,
+                    confidence_score=round(fused.confidence.score, 4),
+                    confidence_level=fused.confidence.level,
+                    trusted_count=fused.confidence.trusted_count,
+                    channel_states=(
+                        self.field.voter.states() if self.field.voter else {}
+                    ),
+                    faulty=self.field.voter.faulty() if self.field.voter else [],
+                    policy_version=fused.policy_version,
+                    policy_fingerprint=fused.policy_fingerprint,
+                )
+            )
+            return fused.as_dict()
+
+    def verify_irradiance(self) -> dict:
+        """核对多路读数、落盘快照与审计三方一致性。"""
+
+        from .field.consistency import verify_field_irradiance
+
+        with self._lock:
+            voter = None
+            if self.field.voter is not None:
+                from .field.voting import IrradianceVoter
+
+                voter = IrradianceVoter(self.field.voter.names)
+            return verify_field_irradiance(
+                self.field.meter.persistence,
+                audit_root=self.store.root,
+                voter=voter,
+            )
+
+    def reset_fusion(self) -> bool:
+        """清掉融合快照与三路哈希链（交付前重新标定用）。"""
+
+        with self._lock:
+            self.field.meter.persistence.reset_fusion()
+            return True
 
     def circulate(self, target_flow_kg_s: float | None = None) -> dict:
         """建立熔盐循环：启泵 → 流量确认 → 通盐。"""

@@ -88,19 +88,29 @@ class IrradianceLimits:
     dni_max_w_m2: float
     sample_period_s: float
     stale_after_s: float
+    meter_channels: tuple[str, ...] = ("irr-a", "irr-b", "irr-c")
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "IrradianceLimits":
+        channels_raw = section.get("meter_channels", ("irr-a", "irr-b", "irr-c"))
+        if not isinstance(channels_raw, list) or not channels_raw:
+            raise ConfigError("meter_channels 必须是非空字符串数组", component="config")
+        channels = tuple(str(item) for item in channels_raw)
+        if len(set(channels)) != len(channels):
+            raise ConfigError("meter_channels 通道名必须唯一", component="config")
         limits = cls(
             dni_min_w_m2=_number(section, "dni_min_w_m2", minimum=0.0),
             dni_max_w_m2=_number(section, "dni_max_w_m2", minimum=1.0),
             sample_period_s=_number(section, "sample_period_s", minimum=1.0),
             stale_after_s=_number(section, "stale_after_s", minimum=1.0),
+            meter_channels=channels,
         )
         if limits.dni_min_w_m2 >= limits.dni_max_w_m2:
             raise ConfigError("辐照下限必须小于上限", component="config")
         if limits.stale_after_s < limits.sample_period_s:
             raise ConfigError("辐照过期时间不得小于采样周期", component="config")
+        if len(channels) < 2:
+            raise ConfigError("多路表决至少需要两台辐照计", component="config")
         return limits
 
     def in_range(self, dni_w_m2: float) -> bool:
@@ -344,7 +354,7 @@ def default_config() -> PlatformConfig:
         name="field-control",
         storage_root="var/state",
         heliostat=HeliostatLimits(0.6, 1.2, 0.9, 12.0, 450.0, 0.94),
-        irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
+        irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0, ("irr-a", "irr-b", "irr-c")),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
@@ -373,6 +383,7 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "dni_max_w_m2": cfg.irradiance.dni_max_w_m2,
                 "sample_period_s": cfg.irradiance.sample_period_s,
                 "stale_after_s": cfg.irradiance.stale_after_s,
+                "meter_channels": list(cfg.irradiance.meter_channels),
             },
             "field": {
                 "focus_threshold_w_m2": cfg.field.focus_threshold_w_m2,
